@@ -1,6 +1,6 @@
 # Market Sentinel (PoC)
 
-Market Sentinel is a proof-of-concept “event-driven risk analyst” for Indian markets.
+Market Sentinel is a proof-of-concept “event-driven risk analyst” for Indian markets, aimed at trading risk/audit teams. It focuses on *why* a move happened, with reproducible, evidence-backed explanations suitable for governance and demos.
 
 When a significant price move occurs in an index or stock (for example, NIFTY 50 drops 1% in 10 minutes), the system:
 
@@ -13,7 +13,7 @@ When a significant price move occurs in an index or stock (for example, NIFTY 50
    - A Python CLI, and
    - A FastAPI backend (for later UI / integrations).
 
-This PoC is designed to run entirely on a MacBook. Cloud deployment (GCP / Azure) can be added later using the same layered architecture.
+This PoC is designed to run entirely on a MacBook. Cloud deployment (GCP / Azure) can be added later using the same layered architecture. A curated “demo pack” (5-year historical events with cached news) ensures engaging demos even on quiet market days.
 
 ---
 
@@ -32,6 +32,7 @@ We use a layered pattern so the PoC can evolve cleanly.
 
 - FastAPI service that exposes:
   - Event detection endpoints.
+  - Event catalog / search endpoints (historical “blips”).
   - Forensic / briefing generation endpoints.
 - Orchestrates:
   - Data access,
@@ -45,18 +46,20 @@ We use a layered pattern so the PoC can evolve cleanly.
   - Text-only briefing generation (Phase 1).
   - Multimodal briefing generation with chart images (Phase 2).
 - Prompt templates and response schemas:
-  - Classification (news-driven / technical / uncertain).
-  - Summary, drivers, technical context, caveats, confidence scores.
+  - Classification (news-driven / technical / structural / uncertain).
+  - Summary, drivers, technical context, caveats, confidence scores, and evidence (headlines + numeric stats).
+  - Deterministic/demo mode for reproducible outputs.
 
 **4. Data layer**
 
 - Market data ingestion and storage:
   - Free / batch-friendly APIs for Indian markets (for example `yfinance` for NIFTY, Sensex, large-cap NSE stocks).
 - Event detection:
-  - Simple rule-based anomaly detection (for example “drop > 1% in 10 minutes”).
+  - Multiple rule-based detectors: drop/rise, gap up/down, volatility spikes, volume z-scores.
+- Event catalog:
+  - Persisted index of detected events with tags (type, severity, interval) for fast demo selection.
 - News retrieval:
-  - Free news API for recent headlines.
-  - Stubbed data is acceptable in early phases.
+  - Live mode and historical mode; curated cached headlines for demo periods (e.g., COVID crash, conflict shocks, tariff/FX events, AI rallies).
 
 ---
 
@@ -132,12 +135,12 @@ market-sentinel/
 ## Phased Roadmap (summary)
 
 - Phase 0: Environment + skeleton (repo structure, Yahoo Finance OHLC fetch).
-- Phase 1: Local store + simple event detection (DuckDB + sliding window drops).
-- Phase 2: Semantic layer (Azure OpenAI text briefings).
-- Phase 3: News enrichment (headlines in prompts).
-- Phase 4: API / orchestration (FastAPI endpoints).
-- Phase 5: Charts + PDF briefings (candlesticks, multimodal if available).
-- Phase 6: CLI + minimal UI (demoable flow).
+- Phase 1: Local store + richer event detection (DuckDB; drop/rise/gap/vol/volume) and event cataloging.
+- Phase 2: Semantic layer (Azure OpenAI text briefings) with evidence blocks and deterministic/demo mode.
+- Phase 3: News enrichment with historical-capable client + curated cache for 5y demos.
+- Phase 4: API / orchestration (FastAPI endpoints) including event catalog search/filter.
+- Phase 5: Charts + PDF briefings (candlesticks with annotations; multimodal if available).
+- Phase 6: CLI + minimal UI (demoable flow; “demo pack” flag to replay curated events).
 
 See `PROJECT_PLAN.md` for detailed tasks and exit criteria—build in order, do not skip phases.
 
@@ -177,19 +180,19 @@ NEWS_API_KEY=...
   ```bash
   python scripts/backfill_history.py
   ```
-  Fetches 5–30 days of 5m bars for a small set of symbols (NIFTY, Sensex, large-cap NSE stocks) and prints row counts / date ranges.
+  Fetches recent intraday bars and (optionally) multi-year daily bars; prints row counts / date ranges.
 
 - Phase 1: Detect simple drop events
   ```bash
   python scripts/detect_events_batch.py
   ```
-  Runs a 10-minute window with a 1% drop threshold by default and prints detected events.
+  Runs configured detectors (drop/rise/gap/vol) over stored data and prints detected events; writes them into an event catalog.
 
 - Phase 2: Generate risk briefings (Azure required)
   ```bash
   python scripts/demo_run_briefings.py
   ```
-  Reuses detection logic, fetches an OHLC slice around the most recent event, calls Azure OpenAI, and prints a structured markdown briefing. News items are included when available.
+  Reuses detection logic, fetches an OHLC slice around the selected event, joins news (live or cached), calls Azure OpenAI, and prints a structured markdown briefing with evidence. Supports deterministic “demo pack” mode for curated historical events.
 
 ---
 
@@ -203,6 +206,8 @@ NEWS_API_KEY=...
   - Returns: RiskBriefing JSON; later may support `format=pdf`.
 - `GET /briefings/recent`
   - Returns recent events with classification/timestamps.
+- `GET /events/catalog`
+  - Query historical events with filters (symbol, date range, type, severity, interval); supports demo pack presets.
 
 ---
 
@@ -210,24 +215,32 @@ NEWS_API_KEY=...
 
 - `market-sentinel scan --days 5 --symbol ^NSEI`
 - `market-sentinel brief --event-id <id> --pdf`
+- `market-sentinel demo --pack five-year-highlights --limit 5` (replay curated events with cached news)
 
 ---
 
 ## Data & Storage
 
 - OHLC persisted to `data/market_sentinel.duckdb` (gitignored).
+- Dual granularity: daily for ~5 years; intraday (5–15m) for recent months.
 - Generated assets:
   - Charts in `charts/`
   - Briefings (JSON/PDF) in `briefings/`
-- News client can stub or use a free API during early phases.
+- Event catalog stored in DuckDB or lightweight JSON index for fast lookup.
+- News client supports:
+  - Live API mode.
+  - Historical mode (from/to).
+  - Demo cache mode (curated headlines for notable periods).
 
 ---
 
 ## Testing Notes
 
 - Add small unit tests for:
-  - Event detection logic (sliding window drop calculation).
-  - Prompt construction and Azure response parsing (schema validation/fallbacks).
+  - Event detection logic (drop/rise/gap/vol/volume stats).
+  - Prompt construction and Azure response parsing (schema validation/fallbacks, evidence blocks).
+  - News matching and cache lookup.
+  - Deterministic/demo mode outputs (golden tests for curated events).
 
 ---
 

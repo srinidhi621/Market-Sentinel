@@ -11,19 +11,21 @@ Guiding Principles
 	•	Each phase produces a runnable MVP, not just scaffolding.
 	•	Use simple, inspectable logic for event detection (no over-engineering).
 	•	Treat the PoC as a mini-product, not a throwaway script.
+	•	Optimize for “why did this happen?” with evidence (headlines + stats).
+	•	Enable reproducible, demo-friendly flows (curated “demo pack”).
 
 ⸻
 
 Phases Overview
 
 Phase	Name	Main Focus
-0	Environment + skeleton	Repo structure, libraries, basic OHLC fetch
-1	Data storage + event detection	DuckDB store, simple detection over past data
-2	Semantic layer (text-only briefings)	Azure OpenAI wiring, risk briefing generator
-3	News enrichment	News client integration, richer prompts
-4	API / orchestration layer	FastAPI endpoints for scan + briefing
-5	Multimodal charts + PDF	Candlestick images, vision, PDF risk briefing
-6	CLI + minimal UI	Usable demo flow for non-engineers
+0	Environment + skeleton	Repo structure, libraries, basic OHLC fetch (daily + intraday)
+1	Data storage + event detection	DuckDB store, multi-detector events + catalog
+2	Semantic layer (text-only briefings)	Azure OpenAI with evidence blocks + deterministic/demo mode
+3	News enrichment (historical-friendly)	Historical-capable client, curated cache for demos
+4	API / orchestration layer	FastAPI endpoints for scan + briefing + event catalog
+5	Multimodal charts + PDF	Candlestick images with annotations, vision/PDF briefing
+6	CLI + minimal UI	Usable demo flow + “demo pack” replay
 
 Team assumption: 1–2 Python-centric engineers.
 
@@ -31,7 +33,7 @@ Team assumption: 1–2 Python-centric engineers.
 
 Phase 0 – Environment + Skeleton
 
-Objective: Get the repo into a usable shape and verify we can fetch Indian market OHLC data locally.
+Objective: Get the repo into a usable shape and verify we can fetch Indian market OHLC data locally (daily 5y + recent intraday).
 
 Tasks:
 	1.	Repo scaffold
@@ -42,11 +44,11 @@ Tasks:
 	•	get_ohlc(symbol: str, interval: str, start: str, end: str) -> pd.DataFrame
 	•	Use yfinance.download or equivalent.
 	•	Focus on:
-	•	^NSEI (NIFTY 50), ^BSESN (Sensex), and 1–2 large-cap NSE stocks (for example RELIANCE.NS).
+	•	^NSEI (NIFTY 50), ^BSESN (Sensex), and 3–5 large-cap NSE stocks (for example RELIANCE.NS, TCS.NS, INFY.NS, HDFCBANK.NS).
 	3.	Backfill script
 	•	Implement scripts/backfill_history.py:
 	•	Hardcode a small list of symbols.
-	•	Pull last 5–30 days of 5-minute OHLC bars.
+	•	Pull last 5–30 days of 5-minute OHLC bars and ~5 years of daily bars.
 	•	Print basic stats (number of rows, date ranges).
 
 Deliverable / Exit Criteria:
@@ -54,20 +56,20 @@ Deliverable / Exit Criteria:
 
 python scripts/backfill_history.py
 
-and see confirmation that OHLC data is fetched.
+and see confirmation that OHLC data (daily + intraday) is fetched.
 
 ⸻
 
 Phase 1 – Data Storage + Event Detection
 
-Objective: Persist OHLC data locally and detect simple “risk events” over historical data.
+Objective: Persist OHLC data locally and detect a range of “risk events” over historical data; build an event catalog for quick lookup and demos.
 
 Tasks:
 	1.	Local store (DuckDB)
 	•	Implement sentinel_data/store/duckdb_store.py:
-	•	write_ohlc(symbol: str, df: pd.DataFrame) -> None
+	•	write_ohlc(symbol: str, df: pd.DataFrame, interval: str) -> None
 	•	read_ohlc(symbol: str, start: datetime, end: datetime, interval: str) -> pd.DataFrame
-	•	Use a single DuckDB file in data/market_sentinel.duckdb.
+	•	Use a single DuckDB file in data/market_sentinel.duckdb; partition by symbol/interval.
 	2.	Data models
 	•	In sentinel_data/models/ohlc.py:
 	•	Pydantic model OHLCBar (symbol, ts, open, high, low, close, volume).
@@ -78,31 +80,30 @@ Tasks:
 	•	start_ts: datetime
 	•	end_ts: datetime
 	•	window_minutes: int
-	•	drop_pct: float
-	•	event_type: Literal["index_drop", "stock_drop"]
+	•	move_pct: float
+	•	event_type: Literal["index_drop", "index_rise", "stock_drop", "stock_rise", "gap_up", "gap_down", "vol_spike"]
+	•	stats: dict (e.g., vol_zscore, gap_size_pct, move_sigma)
 	3.	Event detection
 	•	Implement sentinel_data/event_detector.py:
-	•	detect_events(df: pd.DataFrame, window_minutes: int, drop_threshold_pct: float) -> list[RiskEvent]
-	•	Algorithm:
-	•	Use a sliding window over OHLC close prices.
-	•	For each window:
-	•	Compute percentage change from first close to last close.
-	•	If change <= -drop_threshold_pct, create a RiskEvent.
-	4.	Batch detection script
+	•	detect_events(df: pd.DataFrame, detectors: list[DetectorSpec]) -> list[RiskEvent]
+	•	Support detectors: drop/rise, gap up/down, volatility spike, volume z-score spike.
+	•	Compute and store stats needed for prompts (pct move, sigma vs rolling vol, gap size, volume z-score).
+	4.	Event catalog
+	•	Implement an index (DuckDB table or JSON) to persist RiskEvents with tags: symbol, interval, type, severity, start/end.
+	•	Support listing/filtering by symbol, date range, type, severity.
+	5.	Batch detection script
 	•	Implement scripts/detect_events_batch.py:
-	•	For each tracked symbol:
-	•	Read recent OHLC (for example last trading day).
-	•	Run detect_events with window_minutes=10, drop_threshold_pct=1.0.
-	•	Print list of events as a table.
+	•	Run detectors over daily (multi-year) and intraday windows.
+	•	Insert events into the catalog; print a table of notable events.
 
 Deliverable / Exit Criteria:
-	•	Running python scripts/detect_events_batch.py prints simulated “risk events” for NIFTY and selected stocks.
+	•	Running python scripts/detect_events_batch.py populates the event catalog and prints notable events for NIFTY, Sensex, and selected stocks.
 
 ⸻
 
 Phase 2 – Semantic Layer (Text-Only Risk Briefings)
 
-Objective: Connect to Azure OpenAI and generate structured text-only risk briefings for a given event.
+Objective: Connect to Azure OpenAI and generate structured, evidence-backed text-only risk briefings for a given event; support deterministic/demo mode.
 
 Tasks:
 	1.	Azure client
@@ -115,107 +116,120 @@ Tasks:
 	2.	Prompt design
 	•	Create sentinel_semantic/prompts/base_prompt.txt:
 	•	System prompt: senior market risk analyst, concise, explicit classification.
-	•	Design build_briefing_prompt(event: RiskEvent, ohlc_slice: pd.DataFrame, news_items: list[NewsItem] | None) -> list[dict]:
+	•	Design build_briefing_prompt(event: RiskEvent, ohlc_slice: pd.DataFrame, news_items: list[NewsItem] | None, stats: dict) -> list[dict]:
 	•	Encode:
-	•	Symbol, window, drop percentage.
-	•	High/low in that window vs day high/low.
-	•	Volume vs prior average (basic metrics).
+	•	Symbol, window, move percentage, gap size, vol/volume stats.
+	•	High/low in that window vs day/week high/low.
+	•	Volume vs rolling average.
+	•	Include matched headlines with timestamps/urls when available.
+	•	Support deterministic mode (fixed seeds + supplied news/metrics) for demo reproducibility.
 	3.	Response schema
 	•	Define sentinel_semantic/prompts/briefing_schema.json or Pydantic model RiskBriefing:
-	•	classification: Literal["news_driven", "technical", "uncertain"]
+	•	classification: Literal["news_driven", "technical", "structural", "uncertain"]
 	•	summary_text: str
 	•	technical_context: str
 	•	drivers: list[str]
 	•	confidence: float
 	•	caveats: list[str]
+	•	evidence: list[HeadlineEvidence] (source, headline, published_at, url) plus numeric stats used
 	4.	Briefing generator
 	•	Implement sentinel_semantic/briefing_generator.py:
-	•	generate_briefing(event: RiskEvent, ohlc_slice: pd.DataFrame, news_items: list[NewsItem] | None) -> RiskBriefing
+	•	generate_briefing(event: RiskEvent, ohlc_slice: pd.DataFrame, news_items: list[NewsItem] | None, stats: dict, deterministic: bool = False) -> RiskBriefing
 	•	Handles:
 	•	Prompt construction.
 	•	Azure call.
 	•	JSON parsing and validation / fallback.
+	•	Deterministic/demo mode (seeded and/or cached responses for curated events).
 	5.	Demo script
 	•	Implement scripts/demo_run_briefings.py:
-	•	Calls detect_events_batch logic.
-	•	For the most recent event:
+	•	Calls detect_events_batch logic or reads from event catalog.
+	•	Supports selecting from a curated “demo pack” of historical events (e.g., COVID crash, conflict shocks, AI rallies).
 	•	Fetches OHLC slice around the event.
+	•	Fetches news (live or cached).
 	•	Calls generate_briefing.
-	•	Prints briefing fields in markdown.
+	•	Prints briefing fields in markdown with evidence.
 
 Deliverable / Exit Criteria:
 	•	Single command:
 
 python scripts/demo_run_briefings.py
 
-detects at least one event and prints a structured AI-generated briefing to the console.
+detects or selects an event, fetches slice + news, and prints a structured, evidence-backed AI-generated briefing to the console (works in deterministic demo mode).
 
 ⸻
 
-Phase 3 – News Enrichment
+Phase 3 – News Enrichment (Historical-Friendly)
 
-Objective: Incorporate recent news headlines into the prompt to improve classification and interpretability.
+Objective: Incorporate news headlines (live and historical) into prompts to improve classification, interpretability, and demo reliability over 5 years of history.
 
 Tasks:
 	1.	News client
 	•	Implement sentinel_data/data_sources/news_client.py:
-	•	get_recent_news(symbol: str, lookback_minutes: int) -> list[NewsItem]
+	•	get_news(symbol: str, start: datetime, end: datetime, mode: Literal["live", "historical", "cache"]) -> list[NewsItem]
 	•	Model NewsItem in sentinel_data/models/news.py:
 	•	source: str
 	•	headline: str
 	•	published_at: datetime
 	•	url: str
 	•	summary: str | None
-	2.	Integration
+	•	keywords: list[str] | None
+	2.	Historical and cache strategy
+	•	Support historical-capable sources (e.g., GDELT/NewsAPI with from/to).
+	•	Add curated cached headlines (Parquet/JSON) for “demo pack” periods (COVID crash, conflicts, tariffs, AI rallies).
+	•	Map tickers to keywords for better headline matching; allow fuzzy matching and deduping.
+	3.	Integration
 	•	Modify demo_run_briefings.py to:
-	•	Fetch news_items for the event window.
-	•	Pass them into generate_briefing.
-	3.	Prompt refinement
+	•	Fetch news_items in live/historical/cache modes.
+	•	Pass them into generate_briefing along with stats.
+	4.	Prompt refinement
 	•	Update base prompt to instruct the model:
 	•	Consider both price action and news.
-	•	Reference specific headlines in the explanation when relevant.
+	•	Reference specific headlines with timestamps/urls.
 	•	Implement fallbacks:
-	•	If news_items is empty, steer the model away from unjustified “news-driven” classifications.
+	•	If news_items is empty, steer the model away from unjustified “news-driven” classifications and favor technical/uncertain with caveats.
 
 Deliverable / Exit Criteria:
-	•	Console demo shows:
-	•	Event summary.
-	•	Top news headlines.
-	•	Risk briefing that references these headlines where appropriate.
+	•	Running python scripts/demo_run_briefings.py in live and cache modes produces briefings that cite headlines (when present) and degrade gracefully when none are available.
 
 ⸻
 
 Phase 4 – API / Orchestration Layer
 
-Objective: Wrap the pipeline in a REST API to enable UI, integrations, and automated demos.
+Objective: Wrap the pipeline in a REST API to enable UI, integrations, event catalog queries, and automated demos.
 
 Tasks:
 	1.	FastAPI app
 	•	Implement sentinel_api/main.py with routes:
 	•	POST /events/scan
-	•	Request: { "symbols": [...], "start": "...", "end": "...", "window_minutes": 10, "drop_threshold_pct": 1.0 }
+	•	Request: { "symbols": [...], "start": "...", "end": "...", "window_minutes": 10, "drop_threshold_pct": 1.0, "detectors": [...] }
 	•	Response: list of RiskEvent.
+	•	GET /events/catalog
+	•	Query params: symbol, start, end, type, severity, interval, limit; supports demo pack presets.
 	•	POST /events/{event_id}/briefing
 	•	Request: optional parameters:
 	•	regenerate: bool
+	•	mode: "live" | "historical" | "cache" (news mode)
+	•	deterministic: bool
 	•	Behaviour:
 	•	Load event (or accept full event in body).
-	•	Fetch OHLC slice and news.
+	•	Fetch OHLC slice and news (chosen mode).
 	•	Generate or retrieve briefing.
 	•	Response: RiskBriefing.
 	•	GET /briefings/recent
 	•	Response: list of recent events with classification and timestamps.
 	2.	Services
 	•	sentinel_api/services/event_service.py:
-	•	Encapsulates reading OHLC from DuckDB and calling detect_events.
+	•	Encapsulates reading OHLC from DuckDB and calling detect_events; manages event catalog queries.
 	•	sentinel_api/services/forensic_service.py:
 	•	Encapsulates:
 	•	Reading OHLC slice.
-	•	Fetching news.
+	•	Fetching news (live/historical/cache).
 	•	Calling generate_briefing.
 	•	Persisting briefing JSON to briefings/.
+	•	sentinel_api/services/pdf_service.py:
+	•	HTML → PDF rendering with charts and evidence.
 	3.	Persistence
-	•	Optional: store RiskEvent and RiskBriefing metadata in DuckDB or a simple JSON index for easy lookup by event_id.
+	•	Store RiskEvent and RiskBriefing metadata in DuckDB or a JSON index for lookup by event_id and for demo pack navigation.
 
 Deliverable / Exit Criteria:
 	•	API running via:
@@ -225,32 +239,35 @@ uvicorn sentinel_api.main:app --reload
 
 	•	You can:
 	•	POST /events/scan to get events.
-	•	POST /events/{id}/briefing to get JSON briefings via HTTP.
+	•	GET /events/catalog to browse events.
+	•	POST /events/{id}/briefing to get JSON briefings via HTTP (with selected news mode).
 
 ⸻
 
 Phase 5 – Multimodal Charts + PDF Briefings
 
-Objective: Generate candlestick charts, feed images into the model (if supported), and produce a PDF “Risk Briefing.”
+Objective: Generate candlestick charts, feed images into the model (if supported), and produce a PDF “Risk Briefing” with evidence and annotations.
 
 Tasks:
 	1.	Chart generation
 	•	Implement sentinel_data/charts/generator.py:
 	•	generate_candlestick_chart(symbol: str, df: pd.DataFrame, event: RiskEvent) -> Path
 	•	Use mplfinance:
-	•	Plot a 30–60 minute window around the event.
+	•	Plot a 30–60 minute (intraday) or multi-day window around the event.
+	•	Annotate start/end, gap bars, and notable highs/lows.
 	•	Save PNG to charts/ with a stable naming convention.
 	2.	Multimodal model usage
 	•	Update azure_client and briefing_generator to support image input (if available for the chosen Azure model).
 	•	Prompt:
-	•	Instruct the model to use both the chart and the numerical and news context to explain the event.
+	•	Instruct the model to use chart, numerical stats, and headlines to explain the event.
 	3.	PDF service
 	•	Implement sentinel_api/services/pdf_service.py:
 	•	Build an HTML template (Jinja) including:
 	•	Event metadata.
 	•	AI summary and drivers.
-	•	Top news headlines with URLs.
-	•	Embedded chart image.
+	•	Top news headlines with URLs and timestamps.
+	•	Embedded chart image with annotations.
+	•	Evidence block (stats used).
 	•	Render HTML to PDF with weasyprint (or reportlab if needed).
 	•	Save PDF to briefings/ as <event_id>_briefing.pdf.
 	4.	API extension
@@ -261,38 +278,36 @@ Tasks:
 
 Deliverable / Exit Criteria:
 	•	For at least one event:
-	•	API call generates a candlestick chart, multimodal AI reasoning, and a PDF file with chart and text.
+	•	API call generates a candlestick chart, (optionally) multimodal AI reasoning, and a PDF file with chart, evidence, and text.
 
 ⸻
 
 Phase 6 – CLI + Minimal UI
 
-Objective: Make the PoC demoable to non-engineers with a simple, predictable flow.
+Objective: Make the PoC demoable to non-engineers with a simple, predictable flow and curated demo packs.
 
 Tasks:
 	1.	CLI interface
 	•	Implement sentinel_interface/cli.py using typer or click:
 	•	market-sentinel scan --days 5 --symbol ^NSEI
-	•	Calls API /events/scan, prints events in a table.
 	•	market-sentinel brief --event-id <id> --pdf
-	•	Calls /events/{event_id}/briefing?format=pdf.
-	•	Prints a short summary.
-	•	Shows where the PDF was written.
+	•	market-sentinel demo --pack five-year-highlights --limit 5 --mode cache
+	•	Calls API /events/scan or /events/catalog, prints events in a table, and can generate PDFs.
 	2.	Minimal web UI (optional)
 	•	Use FastAPI with Jinja templates:
-	•	/ – list recent events (symbol, time, drop, classification).
-	•	/event/{event_id} – show structured briefing, link to PDF.
-	•	Keep it intentionally simple.
+	•	/ – list recent and curated events (symbol, time, move, classification).
+	•	/event/{event_id} – show structured briefing, evidence, chart, link to PDF.
+	•	Include filters for symbol, type, severity, and demo packs.
 	3.	Demo script
 	•	Add docs/demo-script.md summarising:
-	•	Commands to run.
-	•	Expected outputs.
-	•	Suggested narrative when demoing to stakeholders.
+	•	Commands to run (live vs demo pack).
+	•	Expected outputs and narrative beats.
+	•	Suggested “highlight reel” events.
 
 Deliverable / Exit Criteria:
 	•	A non-developer can:
-	•	Run a CLI command to scan and brief events.
-	•	Open a PDF risk briefing produced by the system.
+	•	Run a CLI command (or UI) to scan, browse cataloged events, and brief them (JSON/PDF).
+	•	Replay a curated demo pack that answers “why” with charts and headline evidence.
 
 ⸻
 
