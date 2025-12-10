@@ -1,0 +1,44 @@
+---
+
+### `requirements.txt`
+
+```text
+# Core language/runtime
+python-dotenv>=1.0.0
+
+# Web framework / API
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# Data and storage
+pandas>=2.2.0
+yfinance>=0.2.40
+duckdb>=1.0.0
+pyarrow>=16.0.0
+
+# Models and validation
+pydantic>=2.8.0
+
+# CLI
+typer[all]>=0.12.0
+
+# HTTP / external APIs
+requests>=2.32.0
+httpx>=0.27.0
+
+# Charts
+mplfinance>=0.12.10b0
+matplotlib>=3.9.0
+
+# Azure OpenAI / OpenAI client (for Azure)
+openai>=1.40.0
+
+# Templating + PDF (for later phases)
+jinja2>=3.1.4
+weasyprint>=62.0
+# If WeasyPrint is problematic on your Mac, you can switch to reportlab instead:
+# reportlab>=4.2.0
+
+# Optional: date handling helper
+python-dateutil>=2.9.0
+
